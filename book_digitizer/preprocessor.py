@@ -418,6 +418,7 @@ class PagePreprocessor:
             if is_graphic:
                 img_idx += 1
                 filename = f"page_{page_number:05d}_fig_{img_idx:02d}.png"
+                os.makedirs(self.config.extracted_images_dir, exist_ok=True)
                 out_path = os.path.join(self.config.extracted_images_dir, filename)
                 crop_rgb = cv2.cvtColor(bgr[y : y + ch, x : x + cw], cv2.COLOR_BGR2RGB)
                 Image.fromarray(crop_rgb).save(out_path, format="PNG")
