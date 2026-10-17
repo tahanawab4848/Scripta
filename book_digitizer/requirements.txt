@@ -1,0 +1,17 @@
+# Core Multilingual Book Digitizer Dependencies
+opencv-python-headless>=4.8.0
+numpy>=1.24.0
+Pillow>=10.0.0
+pytesseract>=0.3.10
+pdf2image>=1.16.3
+arabic-reshaper>=3.0.0
+python-bidi>=0.4.2
+python-docx>=1.1.0
+EbookLib>=0.18
+reportlab>=4.0.0
+# Pure-Python PDF rendering & stream extraction (no Poppler required)
+pypdf>=5.0.0
+pypdfium2>=4.30.0
+
+# Optional linguistic enhancements
+# language-tool-python>=2.7.1
