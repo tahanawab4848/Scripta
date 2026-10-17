@@ -1,0 +1,1 @@
+-r book_digitizer/requirements.txt
