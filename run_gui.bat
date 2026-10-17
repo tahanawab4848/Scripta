@@ -1,10 +1,10 @@
 @echo off
 setlocal enabledelayedexpansion
-title Multilingual Book Digitizer & Facsimile OCR Studio
+title Scripta - Multilingual Book Digitizer and Facsimile OCR Studio
 
 echo =====================================================================
-echo    Multilingual Book Digitizer & Facsimile OCR Studio
-echo    Urdu, Arabic, Persian & English High-Fidelity Preservation
+echo    Scripta - Multilingual Book Digitizer and Facsimile OCR Studio
+echo    Urdu, Arabic, Persian and English High-Fidelity Preservation
 echo =====================================================================
 echo.
 
@@ -19,7 +19,10 @@ if %ERRORLEVEL% neq 0 (
     exit /b 1
 )
 
-:: 2. Configure portable Tesseract if present in local directory
+:: 2. Set PYTHONPATH to ensure modules can resolve sibling packages
+set "PYTHONPATH=%~dp0book_digitizer;%~dp0;!PYTHONPATH!"
+
+:: 3. Configure portable Tesseract if present in local directory
 if exist "%~dp0tesseract\tesseract.exe" (
     echo [INFO] Detected portable Tesseract at %~dp0tesseract
     set "PATH=%~dp0tesseract;!PATH!"
@@ -30,7 +33,7 @@ if exist "%~dp0tesseract\tesseract.exe" (
     set "TESSERACT_CMD=%~dp0bin\tesseract\tesseract.exe"
 )
 
-:: 3. Configure portable Poppler if present in local directory
+:: 4. Configure portable Poppler if present in local directory
 if exist "%~dp0poppler\Library\bin" (
     echo [INFO] Detected portable Poppler at %~dp0poppler\Library\bin
     set "PATH=%~dp0poppler\Library\bin;!PATH!"
@@ -41,10 +44,10 @@ if exist "%~dp0poppler\Library\bin" (
     set "POPPLER_PATH=%~dp0poppler\bin"
 )
 
-:: 4. Launch Application
+:: 5. Launch Application
 echo [INFO] Launching Digitizer Studio...
 echo.
-python -m book_digitizer.main
+python "%~dp0book_digitizer\main.py"
 
 if %ERRORLEVEL% neq 0 (
     echo.

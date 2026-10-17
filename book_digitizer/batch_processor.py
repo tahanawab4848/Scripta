@@ -5,6 +5,11 @@ import sys
 import time
 import traceback
 from typing import Callable, Dict, Any, List, Optional, Tuple
+
+_PKG_DIR = os.path.dirname(os.path.abspath(__file__))
+if _PKG_DIR not in sys.path:
+    sys.path.insert(0, _PKG_DIR)
+
 from config import AppConfig
 from preprocessor import PagePreprocessor
 from ocr_engine import OCREngine, get_pdf_page_count, render_single_pdf_page

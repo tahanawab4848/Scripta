@@ -5,12 +5,18 @@ import os
 import platform
 import queue
 import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import Dict, Any, Optional, List
 from PIL import Image, ImageTk
+
+# Ensure book_digitizer directory is on sys.path for direct module resolution
+_PKG_DIR = os.path.dirname(os.path.abspath(__file__))
+if _PKG_DIR not in sys.path:
+    sys.path.insert(0, _PKG_DIR)
 
 from config import DEFAULT_CONFIG, AppConfig, LANGUAGE_PRESETS, check_system_health
 from batch_processor import BatchProcessor, extract_page_plain_text

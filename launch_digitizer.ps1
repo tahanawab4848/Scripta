@@ -25,6 +25,10 @@ if (Test-Path $LocalPoppler) {
     $env:POPPLER_PATH = $LocalPoppler
 }
 
-# 3. Launch Application
+# 3. Environment & PYTHONPATH setup
+$DigitizerDir = Join-Path $ScriptDir "book_digitizer"
+$env:PYTHONPATH = "$DigitizerDir;$ScriptDir;$($env:PYTHONPATH)"
+
+# 4. Launch Application
 Write-Host "[INFO] Launching Digitizer Studio..." -ForegroundColor Green
-python -m book_digitizer.main
+python (Join-Path $DigitizerDir "main.py")
