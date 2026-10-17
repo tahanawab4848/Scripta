@@ -1,0 +1,74 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scripta"
+version = "1.0.0"
+description = "Production-grade archival book digitizer, layout analyzer and searchable facsimile studio"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Muhammad Taha Nawab", email = "tahanawab.official@gmail.com" }
+]
+keywords = [
+    "ocr",
+    "digitization",
+    "facsimile",
+    "urdu",
+    "arabic",
+    "nastaliq",
+    "alto-xml",
+    "pagexml",
+    "sandwich-pdf",
+    "tesseract"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Education",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+    "Topic :: Text Processing :: Linguistic",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent"
+]
+dependencies = [
+    "opencv-python-headless>=4.8.0",
+    "numpy>=1.24.0",
+    "Pillow>=10.0.0",
+    "pytesseract>=0.3.10",
+    "pdf2image>=1.16.3",
+    "arabic-reshaper>=3.0.0",
+    "python-bidi>=0.4.2",
+    "python-docx>=1.1.0",
+    "EbookLib>=0.18",
+    "reportlab>=4.0.0",
+    "pypdf>=5.0.0",
+    "pypdfium2>=4.30.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.1.0"
+]
+
+[project.scripts]
+scripta = "book_digitizer.main:main"
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra -q"
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
