@@ -45,6 +45,7 @@ ehthumbs.db
 # Scripta Runtime & Output Artifacts
 .checkpoints/
 output/
+digitized_output/
 test_out/
 test_archival_out/
 temp/
