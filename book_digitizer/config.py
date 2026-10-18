@@ -312,16 +312,27 @@ class AppConfig:
         os.makedirs(self.extracted_images_dir, exist_ok=True)
 
     @property
+    def book_slug(self) -> str:
+        """Unique safe identifier for the active book to keep checkpoints isolated."""
+        if not self.input_pdf_path:
+            return "default_book"
+        import hashlib, re
+        base = os.path.splitext(os.path.basename(self.input_pdf_path))[0]
+        safe_name = re.sub(r"[^\w\-_\. ]", "_", base)[:40].strip() or "book"
+        pdf_hash = hashlib.md5(os.path.abspath(self.input_pdf_path).encode("utf-8")).hexdigest()[:6]
+        return f"{safe_name}_{pdf_hash}"
+
+    @property
     def checkpoint_dir(self) -> str:
-        return os.path.join(self.output_dir, ".checkpoints")
+        return os.path.join(self.output_dir, ".checkpoints", self.book_slug)
 
     @property
     def extracted_images_dir(self) -> str:
-        return os.path.join(self.output_dir, ".checkpoints", "images")
+        return os.path.join(self.output_dir, ".checkpoints", self.book_slug, "images")
 
     @property
     def state_file_path(self) -> str:
-        return os.path.join(self.output_dir, ".checkpoints", "run_state.json")
+        return os.path.join(self.output_dir, ".checkpoints", self.book_slug, "run_state.json")
 
 
 DEFAULT_CONFIG = AppConfig()
