@@ -3,7 +3,7 @@ import io
 import json
 import os
 import random
-
+import re
 import time
 import unicodedata
 from typing import Dict, Any, List, Optional, Tuple
@@ -13,6 +13,9 @@ import requests
 from pdf2image import convert_from_path, pdfinfo_from_path
 from PIL import Image
 from config import AppConfig
+
+# Illegal control characters in XML 1.0 specifications
+_ILLEGAL_XML_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x84\x86-\x9f\ufffe\uffff]")
 
 
 def get_pdf_page_count(pdf_path: str, poppler_path: Optional[str] = None) -> int:
@@ -462,103 +465,94 @@ class OCREngine:
                 return None
 
             page_w_pt, page_h_pt = page.get_size()
-            n_rects = tp.count_rects()
-            lines_text: List[str] = []
-            if n_rects == 0:
-                raw_text = tp.get_text_range()
-                if len(raw_text.strip()) < threshold:
-                    return None
-                lines_text = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
 
             structured_lines: List[Dict[str, Any]] = []
             valid_confidences: List[float] = []
+            all_page_words: List[Dict[str, Any]] = []
             total_rtl = 0
             total_ltr = 0
 
-            if n_rects > 0:
-                for r_idx in range(n_rects):
-                    rect = tp.get_rect(r_idx)
-                    l, b, r, t = rect
-                    line_text = tp.get_text_bounded(l, b, r, t).strip()
-                    if not line_text:
-                        continue
+            # Reconstruct lines and words sequentially from the character stream
+            current_line_words: List[Dict[str, Any]] = []
+            current_word_chars: List[str] = []
+            current_word_boxes: List[Tuple[float, float, float, float]] = []
 
-                    top_y = max(0.0, page_h_pt - t)
-                    height_pt = max(6.0, t - b)
-                    width_pt = max(10.0, r - l)
+            def _finish_word():
+                nonlocal current_word_chars, current_word_boxes, current_line_words, total_rtl, total_ltr, valid_confidences, all_page_words
+                if not current_word_chars:
+                    return
+                raw_token = "".join(current_word_chars)
+                clean_token = _ILLEGAL_XML_CHARS_RE.sub("", raw_token).strip()
+                if clean_token and current_word_boxes:
+                    x0 = min(b[0] for b in current_word_boxes)
+                    x1 = max(b[2] for b in current_word_boxes)
+                    yb = min(b[1] for b in current_word_boxes)
+                    yt = max(b[3] for b in current_word_boxes)
 
-                    px_x = int(l * scale)
-                    px_y = int(top_y * scale)
-                    px_w = max(1, int(width_pt * scale))
-                    px_h = max(1, int(height_pt * scale))
+                    px_x = int(x0 * scale)
+                    px_y = int((page_h_pt - yt) * scale)
+                    px_w = max(1, int((x1 - x0) * scale))
+                    px_h = max(1, int((yt - yb) * scale))
 
-                    tokens = line_text.split()
-                    line_words: List[Dict[str, Any]] = []
-                    word_spacing = max(1, px_w // max(1, len(tokens)))
+                    meta = self.analyze_token_script(clean_token)
+                    total_rtl += meta["rtl_chars"]
+                    total_ltr += meta["ltr_chars"]
+                    valid_confidences.append(99.9)
 
-                    for w_idx, tok in enumerate(tokens):
-                        meta = self.analyze_token_script(tok)
-                        total_rtl += meta["rtl_chars"]
-                        total_ltr += meta["ltr_chars"]
-                        valid_confidences.append(99.9)
-
-                        wx = px_x + w_idx * word_spacing
-                        ww = max(10, int(len(tok) * 12 * scale / 2.0))
-                        line_words.append({
-                            "word_index": w_idx,
-                            "raw_text": tok,
-                            "text": tok,
-                            "confidence": 99.9,
-                            "bbox": [wx, px_y, min(ww, word_spacing), px_h],
-                            "direction": meta["direction"],
-                            "script": meta["script"],
-                            "diacritics": meta["diacritics"],
-                            "is_low_confidence": False,
-                        })
-
-                    line_dir = "RTL" if sum(1 for w in line_words if w["direction"] == "RTL") >= len(line_words) / 2 else "LTR"
-                    bidi_sorted = self.sort_line_words_bidi(line_words, line_dir)
-                    structured_lines.append({
-                        "block_num": 1,
-                        "par_num": 1,
-                        "line_num": r_idx + 1,
+                    word_obj = {
+                        "word_index": len(current_line_words),
+                        "raw_text": clean_token,
+                        "text": clean_token,
+                        "confidence": 99.9,
                         "bbox": [px_x, px_y, px_w, px_h],
-                        "direction": line_dir,
-                        "confidence": 99.9,
-                        "words": bidi_sorted,
-                    })
-            elif lines_text:
-                line_h_px = max(24, int(page_h_pt * scale / max(1, len(lines_text) * 1.5)))
-                for l_idx, l_str in enumerate(lines_text):
-                    tokens = l_str.split()
-                    line_words_fallback: List[Dict[str, Any]] = []
-                    ly = int((l_idx + 1) * line_h_px * 1.1)
-                    for w_idx, tok in enumerate(tokens):
-                        meta = self.analyze_token_script(tok)
-                        total_rtl += meta["rtl_chars"]
-                        total_ltr += meta["ltr_chars"]
-                        valid_confidences.append(99.9)
-                        line_words_fallback.append({
-                            "word_index": w_idx,
-                            "raw_text": tok,
-                            "text": tok,
-                            "confidence": 99.9,
-                            "bbox": [50 + w_idx * 60, ly, 50, line_h_px],
-                            "direction": meta["direction"],
-                            "script": meta["script"],
-                            "diacritics": meta["diacritics"],
-                            "is_low_confidence": False,
-                        })
-                    line_dir = "RTL" if sum(1 for w in line_words_fallback if w["direction"] == "RTL") >= len(line_words_fallback) / 2 else "LTR"
-                    structured_lines.append({
-                        "block_num": 1,
-                        "par_num": 1,
-                        "line_num": l_idx + 1,
-                        "bbox": [50, ly, int(page_w_pt * scale) - 100, line_h_px],
-                        "direction": line_dir,
-                        "confidence": 99.9,
-                        "words": self.sort_line_words_bidi(line_words_fallback, line_dir),
-                    })
+                        "direction": meta["direction"],
+                        "script": meta["script"],
+                        "diacritics": meta["diacritics"],
+                        "is_low_confidence": False,
+                    }
+                    current_line_words.append(word_obj)
+                    all_page_words.append(word_obj)
+
+                current_word_chars = []
+                current_word_boxes = []
+
+            def _finish_line():
+                nonlocal current_line_words, structured_lines
+                _finish_word()
+                if not current_line_words:
+                    return
+                lx0 = min(w["bbox"][0] for w in current_line_words)
+                ly0 = min(w["bbox"][1] for w in current_line_words)
+                lx1 = max(w["bbox"][0] + w["bbox"][2] for w in current_line_words)
+                ly1 = max(w["bbox"][1] + w["bbox"][3] for w in current_line_words)
+
+                line_dir = "RTL" if sum(1 for w in current_line_words if w["direction"] == "RTL") >= len(current_line_words) / 2 else "LTR"
+                sorted_words = self.sort_line_words_bidi(current_line_words, line_dir)
+                line_text = " ".join(w["text"] for w in sorted_words)
+
+                structured_lines.append({
+                    "block_num": 1,
+                    "par_num": 1,
+                    "line_num": len(structured_lines) + 1,
+                    "logical_text": line_text,
+                    "bbox": [lx0, ly0, max(1, lx1 - lx0), max(1, ly1 - ly0)],
+                    "direction": line_dir,
+                    "confidence": 99.9,
+                    "words": sorted_words,
+                })
+                current_line_words = []
+
+            for i in range(char_count):
+                ch = tp.get_text_range(i, 1)
+                box = tp.get_charbox(i)
+                if ch in ("\r", "\n"):
+                    _finish_line()
+                elif ch in (" ", "\t", "\xa0"):
+                    _finish_word()
+                else:
+                    current_word_chars.append(ch)
+                    current_word_boxes.append(box)
+            _finish_line()
 
             if not structured_lines:
                 return None
@@ -569,7 +563,8 @@ class OCREngine:
                 "psm_used": 6,
                 "page_direction": page_dir,
                 "mean_confidence": 99.9,
-                "word_count": len(valid_confidences),
+                "word_count": len(all_page_words),
+                "words": all_page_words,
                 "low_confidence_word_count": 0,
                 "rtl_char_count": total_rtl,
                 "ltr_char_count": total_ltr,
@@ -820,3 +815,17 @@ class OCREngine:
                 return llm_result
 
         return tesseract_payload
+
+    def recognize(
+        self,
+        image_or_path: Any,
+        page_number: int = 1,
+        illustrations: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Universal recognition alias. Accepts either an open PIL.Image or a file path string.
+        """
+        if isinstance(image_or_path, str):
+            with Image.open(image_or_path) as img:
+                return self.run_ocr_on_page(img.convert("RGB"), page_number, illustrations)
+        return self.run_ocr_on_page(image_or_path, page_number, illustrations)
