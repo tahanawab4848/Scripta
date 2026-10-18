@@ -1,5 +1,5 @@
 import re
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
 import numpy as np
 from config import AppConfig
 
@@ -34,6 +34,22 @@ class LayoutAnalyzer:
 
     def __init__(self, config: AppConfig):
         self.config = config
+
+    def analyze(
+        self,
+        ocr_page: Dict[str, Any],
+        page_number: Optional[int] = None,
+        preproc_meta: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Backward-compatible alias for analyze_page."""
+        if preproc_meta is None:
+            preproc_meta = {
+                "page_number": page_number or ocr_page.get("page_number", 1),
+                "width": ocr_page.get("page_width", ocr_page.get("width", 2400)),
+                "height": ocr_page.get("page_height", ocr_page.get("height", 3400)),
+                "illustrations": ocr_page.get("illustrations", []),
+            }
+        return self.analyze_page(ocr_page, preproc_meta)
 
     def analyze_page(
         self, ocr_page: Dict[str, Any], preproc_meta: Dict[str, Any]
