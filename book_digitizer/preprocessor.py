@@ -23,6 +23,17 @@ class PagePreprocessor:
         Run the configured OpenCV preprocessing pipeline on a single rendered page.
         Returns the processed PIL image and metadata (skew angle, extracted illustrations).
         """
+        return self._process_impl(pil_image, page_number)
+
+    def process(
+        self, pil_image: Image.Image, page_number: int
+    ) -> Tuple[Image.Image, Dict[str, Any]]:
+        """Alias for process_page."""
+        return self._process_impl(pil_image, page_number)
+
+    def _process_impl(
+        self, pil_image: Image.Image, page_number: int
+    ) -> Tuple[Image.Image, Dict[str, Any]]:
         rgb_np = np.array(pil_image.convert("RGB"))
         bgr_np = cv2.cvtColor(rgb_np, cv2.COLOR_RGB2BGR)
         gray = cv2.cvtColor(bgr_np, cv2.COLOR_BGR2GRAY)
