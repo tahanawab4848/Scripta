@@ -1,5 +1,6 @@
 import html
 import os
+import re
 from typing import Dict, Any, List, Tuple
 import docx
 from docx import Document
@@ -7,6 +8,20 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_COLOR_INDEX
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
+
+_ILLEGAL_XML_CHARS_RE = re.compile(
+    r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x84\x86-\x9f\ufffe\uffff]"
+)
+
+
+def _clean_xml(text: Any) -> str:
+    """Strip XML-incompatible control characters that crash python-docx and lxml."""
+    if text is None:
+        return ""
+    if not isinstance(text, str):
+        text = str(text)
+    return _ILLEGAL_XML_CHARS_RE.sub("", text)
+
 from ebooklib import epub
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -70,47 +85,93 @@ class BookBuilder:
         pages_sorted = sorted(pages_layout, key=lambda p: p["page_number"])
         pages_stitched = self._stitch_cross_page_footnotes(pages_sorted)
         outputs: Dict[str, str] = {}
+        import shutil
+
+        book_base = os.path.splitext(os.path.basename(self.config.input_pdf_path))[0] if self.config.input_pdf_path else "digitized_book"
+        safe_prefix = re.sub(r'[\\/*?:"<>|]', "", book_base).strip() or "digitized_book"
 
         # 1. Searchable Facsimile ('Sandwich') PDF: Scan image + invisible selectable OCR text
         if getattr(self.config, "export_sandwich_pdf", True):
-            sandwich_path = os.path.join(self.config.output_dir, "digitized_book_sandwich.pdf")
+            sandwich_path = os.path.join(self.config.output_dir, f"{safe_prefix}_sandwich.pdf")
             self.build_sandwich_pdf(pages_stitched, sandwich_path)
+            std_path = os.path.join(self.config.output_dir, "digitized_book_sandwich.pdf")
+            if sandwich_path != std_path:
+                try:
+                    shutil.copyfile(sandwich_path, std_path)
+                except Exception:
+                    pass
             outputs["sandwich_pdf"] = sandwich_path
 
         # 2. Formatted DOCX
         if self.config.export_docx:
-            docx_path = os.path.join(self.config.output_dir, "digitized_book.docx")
+            docx_path = os.path.join(self.config.output_dir, f"{safe_prefix}.docx")
             self.build_docx(pages_stitched, docx_path)
+            std_docx = os.path.join(self.config.output_dir, "digitized_book.docx")
+            if docx_path != std_docx:
+                try:
+                    shutil.copyfile(docx_path, std_docx)
+                except Exception:
+                    pass
             outputs["docx"] = docx_path
 
         # 3. Reflowable Searchable PDF
         if self.config.export_pdf:
-            pdf_path = os.path.join(self.config.output_dir, "digitized_book_reflowable.pdf")
+            pdf_path = os.path.join(self.config.output_dir, f"{safe_prefix}_reflowable.pdf")
             self.build_pdf(pages_stitched, pdf_path)
+            std_pdf = os.path.join(self.config.output_dir, "digitized_book_reflowable.pdf")
+            if pdf_path != std_pdf:
+                try:
+                    shutil.copyfile(pdf_path, std_pdf)
+                except Exception:
+                    pass
             outputs["pdf"] = pdf_path
 
         # 4. EPUB3 eBook
         if self.config.export_epub:
-            epub_path = os.path.join(self.config.output_dir, "digitized_book.epub")
+            epub_path = os.path.join(self.config.output_dir, f"{safe_prefix}.epub")
             self.build_epub(pages_stitched, epub_path)
+            std_epub = os.path.join(self.config.output_dir, "digitized_book.epub")
+            if epub_path != std_epub:
+                try:
+                    shutil.copyfile(epub_path, std_epub)
+                except Exception:
+                    pass
             outputs["epub"] = epub_path
 
         # 5. Clean UTF-8 TXT
         if self.config.export_txt:
-            txt_path = os.path.join(self.config.output_dir, "digitized_book.txt")
+            txt_path = os.path.join(self.config.output_dir, f"{safe_prefix}.txt")
             self.build_txt(pages_stitched, txt_path)
+            std_txt = os.path.join(self.config.output_dir, "digitized_book.txt")
+            if txt_path != std_txt:
+                try:
+                    shutil.copyfile(txt_path, std_txt)
+                except Exception:
+                    pass
             outputs["txt"] = txt_path
 
         # 6. HTML5 Print Replica
         if self.config.export_html_weasyprint:
-            html_path = os.path.join(self.config.output_dir, "digitized_book_replica.html")
+            html_path = os.path.join(self.config.output_dir, f"{safe_prefix}_replica.html")
             self.build_html_replica(pages_stitched, html_path)
+            std_html = os.path.join(self.config.output_dir, "digitized_book_replica.html")
+            if html_path != std_html:
+                try:
+                    shutil.copyfile(html_path, std_html)
+                except Exception:
+                    pass
             outputs["html_replica"] = html_path
 
         # 7. Library of Congress ALTO XML 4.2 (Archival preservation standard)
         if getattr(self.config, "export_alto_xml", True):
-            alto_path = os.path.join(self.config.output_dir, "digitized_book_alto.xml")
+            alto_path = os.path.join(self.config.output_dir, f"{safe_prefix}_alto.xml")
             self.build_alto_xml(pages_stitched, alto_path)
+            std_alto = os.path.join(self.config.output_dir, "digitized_book_alto.xml")
+            if alto_path != std_alto:
+                try:
+                    shutil.copyfile(alto_path, std_alto)
+                except Exception:
+                    pass
             outputs["alto_xml"] = alto_path
 
         # 8. PRImA PageXML 2019-07-15 (Digital Humanities & Institutional Library standard)
@@ -212,7 +273,7 @@ class BookBuilder:
                 chunks.append((token_str, w_rtl, is_low))
 
         for chunk_text, chunk_rtl, chunk_low in chunks:
-            run = paragraph.add_run(chunk_text)
+            run = paragraph.add_run(_clean_xml(chunk_text))
             self._style_docx_run(
                 run,
                 is_rtl=chunk_rtl,
@@ -236,11 +297,11 @@ class BookBuilder:
 
             # Render page header metadata if present
             if page.get("headers"):
-                hdr_text = " | ".join(h["logical_text"] for h in page["headers"] if h["logical_text"])
+                hdr_text = " | ".join(h["logical_text"] for h in page["headers"] if h.get("logical_text"))
                 if hdr_text:
                     hp = doc.add_paragraph()
                     self._set_docx_paragraph_bidi(hp, page_dir == "RTL")
-                    hrun = hp.add_run(hdr_text)
+                    hrun = hp.add_run(_clean_xml(hdr_text))
                     self._style_docx_run(hrun, page_dir == "RTL", font_size_pt=9.5)
                     hrun.font.color.rgb = RGBColor(110, 110, 110)
 
@@ -266,7 +327,7 @@ class BookBuilder:
                         p_poem.paragraph_format.space_after = Pt(3)
                         self._set_docx_paragraph_bidi(p_poem, page_dir == "RTL")
                         verse_text = f"{c.get('misra_1', '')}   —   {c.get('misra_2', '')}"
-                        v_run = p_poem.add_run(verse_text)
+                        v_run = p_poem.add_run(_clean_xml(verse_text))
                         self._style_docx_run(v_run, page_dir == "RTL", font_size_pt=13.0, bold=False)
                     continue
 
@@ -274,14 +335,14 @@ class BookBuilder:
                     p_p = doc.add_paragraph()
                     self._set_docx_paragraph_bidi(p_p, page_dir == "RTL")
                     p_p.alignment = WD_ALIGN_PARAGRAPH.RIGHT if page_dir == "RTL" else WD_ALIGN_PARAGRAPH.LEFT
-                    run_top = p_p.add_run(el.get("primary_text", ""))
+                    run_top = p_p.add_run(_clean_xml(el.get("primary_text", "")))
                     self._style_docx_run(run_top, page_dir == "RTL", font_size_pt=13.5, bold=True)
 
                     p_g = doc.add_paragraph()
                     self._set_docx_paragraph_bidi(p_g, page_dir == "RTL")
                     p_g.alignment = WD_ALIGN_PARAGRAPH.RIGHT if page_dir == "RTL" else WD_ALIGN_PARAGRAPH.LEFT
                     p_g.paragraph_format.space_after = Pt(6)
-                    run_sub = p_g.add_run(f"↳ {el.get('gloss_text', '')}")
+                    run_sub = p_g.add_run(_clean_xml(f"↳ {el.get('gloss_text', '')}"))
                     self._style_docx_run(run_sub, page_dir == "RTL", font_size_pt=9.5, italic=True)
                     run_sub.font.color.rgb = RGBColor(90, 90, 90)
                     continue
@@ -292,7 +353,7 @@ class BookBuilder:
                     self._set_docx_paragraph_bidi(sp, page_dir == "RTL")
                     sp.paragraph_format.left_indent = Inches(0.4)
                     sp.paragraph_format.right_indent = Inches(0.4)
-                    s_run = sp.add_run(f"[Note: {el.get('logical_text', '')}]")
+                    s_run = sp.add_run(_clean_xml(f"[Note: {el.get('logical_text', '')}]"))
                     self._style_docx_run(s_run, page_dir == "RTL", font_size_pt=10.0)
                     s_run.font.italic = True
                     s_run.font.color.rgb = RGBColor(100, 100, 100)
@@ -309,7 +370,7 @@ class BookBuilder:
                                 cell_p = tbl.cell(r_i, c_i).paragraphs[0]
                                 is_rtl = el.get("direction", "RTL") == "RTL"
                                 self._set_docx_paragraph_bidi(cell_p, is_rtl)
-                                run = cell_p.add_run(cell_val)
+                                run = cell_p.add_run(_clean_xml(cell_val))
                                 self._style_docx_run(run, is_rtl, font_size_pt=11.0)
                     continue
 
@@ -354,7 +415,7 @@ class BookBuilder:
             footer_parts.append(f"— Page {page_label} (Scan #{page['page_number']}) —")
             fp = doc.add_paragraph()
             fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            frun = fp.add_run(" | ".join(footer_parts))
+            frun = fp.add_run(_clean_xml(" | ".join(footer_parts)))
             self._style_docx_run(frun, page_dir == "RTL", font_size_pt=9.0)
             frun.font.color.rgb = RGBColor(120, 120, 120)
 
@@ -1022,7 +1083,7 @@ class BookBuilder:
                             "String",
                             {
                                 "ID": f"w_{pnum}_{b_idx}_{l_idx}_{w_idx}",
-                                "CONTENT": w.get("text", ""),
+                                "CONTENT": _clean_xml(w.get("text", "")),
                                 "HPOS": str(wx),
                                 "VPOS": str(wy),
                                 "WIDTH": str(ww),
@@ -1115,12 +1176,12 @@ class BookBuilder:
                         base_y = ly_val + int(lh * 0.85)
                         ET.SubElement(line_el, "Baseline", {"points": f"{lx},{base_y} {lx+lw},{base_y}"})
 
-                        line_txt = " ".join(w.get("text", "") for w in line_words)
+                        line_txt = _clean_xml(" ".join(w.get("text", "") for w in line_words))
                         te = ET.SubElement(line_el, "TextEquiv")
                         ET.SubElement(te, "Unicode").text = line_txt
 
                 te_reg = ET.SubElement(region, "TextEquiv")
-                ET.SubElement(te_reg, "Unicode").text = el.get("logical_text", "")
+                ET.SubElement(te_reg, "Unicode").text = _clean_xml(el.get("logical_text", ""))
 
             raw_str = ET.tostring(pcgts, encoding="utf-8")
             parsed = minidom.parseString(raw_str)
