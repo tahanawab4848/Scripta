@@ -265,8 +265,8 @@ class TextCorrector:
             flagged_logical_tokens: List[str] = []
 
             for word in line.get("words", []):
-                raw = word["raw_text"]
-                conf = float(word["confidence"])
+                raw = word.get("raw_text") or word.get("text", "")
+                conf = float(word.get("confidence", 99.0))
                 w_dir = word.get("direction", line_dir)
 
                 cleaned = self.normalize_token(raw, w_dir)
@@ -293,7 +293,7 @@ class TextCorrector:
                             "page": ocr_page["page_number"],
                             "word": cleaned,
                             "confidence": conf,
-                            "bbox": word["bbox"],
+                            "bbox": word.get("bbox", [0, 0, 10, 10]),
                         }
                     )
                 else:
@@ -324,8 +324,15 @@ class TextCorrector:
                 flagged_line, base_direction=line_dir
             )
 
+        all_page_words = [w for ln in ocr_page.get("lines", []) for w in ln.get("words", [])]
+        ocr_page["words"] = all_page_words
+        ocr_page["word_count"] = len(all_page_words)
         ocr_page["flagged_words"] = flagged_words_summary
         return ocr_page
+
+    def correct(self, ocr_page: Dict[str, Any]) -> Dict[str, Any]:
+        """Alias for process_ocr_page."""
+        return self.process_ocr_page(ocr_page)
 
     @staticmethod
     def _join_bidi_tokens(tokens: List[str], line_dir: str, primary_language: str = "urd") -> str:
