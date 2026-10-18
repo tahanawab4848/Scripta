@@ -54,7 +54,6 @@ def extract_page_plain_text(page_layout: Optional[Dict[str, Any]]) -> str:
         elif el_type == "footnote":
             lines.append(f"[Footnote: {el.get('logical_text', '').strip()}]")
         elif el_type in ("title_page_line", "chapter_heading", "section_heading"):
-
             lines.append(f"## {el.get('logical_text', '').strip()}")
         else:
             t = el.get("logical_text", "").strip()
@@ -96,412 +95,318 @@ def process_single_page_worker(args: Tuple[Dict[str, Any], int]) -> Dict[str, An
             poppler_path=config.poppler_path,
         )
 
+        os.makedirs(config.extracted_images_dir, exist_ok=True)
+        preview_path = os.path.join(
+            config.extracted_images_dir, f"page_{page_number:05d}_preview.png"
+        )
+
         if digital_ocr is not None:
             # Born-digital: Bypass optical preprocessing & dewarping, preserve clean digital text
-            preproc_meta = {
+            raw_ocr = digital_ocr
+            try:
+                pil_img.save(preview_path, format="PNG")
+                preprocessed_path = preview_path
+            except Exception:
+                preprocessed_path = ""
+            pre_metrics: Dict[str, Any] = {
                 "page_number": page_number,
-                "skew_angle": 0.0,
-                "dewarped": False,
-                "denoised": False,
+                "width": pil_img.width,
+                "height": pil_img.height,
+                "deskew_angle": 0.0,
+                "dewarp_applied": False,
+                "spine_shadow_removed": False,
+                "bleed_through_reduced": False,
+                "is_born_digital": True,
                 "illustrations": [],
-                "page_dimensions": pil_img.size,
-                "source": "born_digital_vector",
             }
-            processed_pil = pil_img
-            ocr_raw = digital_ocr
         else:
-            # Scanned / raster page: run full OpenCV Sauvola, deskew, 3D curl dewarping, and OCR
+            # Scanned book: Run physical restoration pipeline
             preprocessor = PagePreprocessor(config)
-            processed_pil, preproc_meta = preprocessor.process_page(pil_img, page_number)
-            ocr_raw = ocr_engine.run_ocr_on_page(
+            processed_pil, pre_metrics = preprocessor.process_page(
+                pil_img, page_number=page_number
+            )
+            try:
+                processed_pil.save(preview_path, format="PNG")
+                preprocessed_path = preview_path
+            except Exception:
+                preprocessed_path = ""
+            raw_ocr = ocr_engine.run_ocr_on_page(
                 processed_pil,
                 page_number=page_number,
-                illustrations=preproc_meta.get("illustrations", []),
+                illustrations=pre_metrics.get("illustrations", []),
             )
 
-        # Save compact, optimized JPEG preview snapshot for instant UI page inspection (saves ~97% disk space)
-        preview_img_path = os.path.join(
-            config.extracted_images_dir, f"page_{page_number:05d}_preview.jpg"
-        )
-        try:
-            max_dim = getattr(config, "inspector_image_max_dim", 1600)
-            orig_w, orig_h = processed_pil.size
-            if max(orig_w, orig_h) > max_dim:
-                scale = max_dim / float(max(orig_w, orig_h))
-                new_w = int(orig_w * scale)
-                new_h = int(orig_h * scale)
-                thumb = processed_pil.resize((new_w, new_h), Image.Resampling.LANCZOS)
-            else:
-                thumb = processed_pil
-
-            if thumb.mode not in ("RGB", "L"):
-                thumb = thumb.convert("RGB")
-            quality = getattr(config, "inspector_image_quality", 85)
-            thumb.save(preview_img_path, format="JPEG", quality=quality, optimize=True)
-        except Exception:
-            preview_img_path = ""
-
+        # 3. Post-OCR Linguistic Correction & Classical Normalization
         corrector = TextCorrector(config)
-        ocr_corrected = corrector.process_ocr_page(ocr_raw)
+        corrected_ocr = corrector.process_ocr_page(raw_ocr)
 
+        # 4. Layout & Structural Semantic Analysis
         analyzer = LayoutAnalyzer(config)
-        page_layout = analyzer.analyze_page(ocr_corrected, preproc_meta)
+        layout = analyzer.analyze_page(corrected_ocr, pre_metrics)
 
-        elapsed = round(time.time() - start_ts, 2)
-        extracted_text = extract_page_plain_text(page_layout)
+        # Re-inject manually edited text if previously modified
+        plain_text = extract_page_plain_text(layout)
 
-        result_payload = {
-            "status": "success",
+        result_payload: Dict[str, Any] = {
             "page_number": page_number,
-            "elapsed_sec": elapsed,
-            "mean_confidence": page_layout["mean_confidence"],
-            "word_count": page_layout["word_count"],
-            "low_confidence_word_count": page_layout["low_confidence_word_count"],
-            "page_direction": page_layout["page_direction"],
-            "column_count": page_layout["column_count"],
-            "preview_image_path": preview_img_path,
-            "extracted_text": extracted_text,
-            "layout": page_layout,
-            "error": None,
+            "input_pdf_path": os.path.abspath(config.input_pdf_path),
+            "status": "success",
+            "mean_confidence": round(corrected_ocr.get("mean_confidence", 0.0), 2),
+            "word_count": len(corrected_ocr.get("words", [])),
+            "low_confidence_word_count": sum(
+                1 for w in corrected_ocr.get("words", []) if w.get("confidence", 100) < config.confidence_threshold
+            ),
+            "page_direction": layout.get("page_direction", layout.get("dominant_direction", "LTR")),
+            "column_count": layout.get("column_count", 1),
+            "preview_image_path": preprocessed_path,
+            "layout": layout,
+            "extracted_text": plain_text,
+            "preprocessing_metrics": pre_metrics,
+            "duration_sec": round(time.time() - start_ts, 2),
+            "timestamp": time.time(),
         }
 
-        tmp_file = checkpoint_file + ".tmp"
-        with open(tmp_file, "w", encoding="utf-8") as f:
+        # Write atomic checkpoint to disk
+        os.makedirs(config.checkpoint_dir, exist_ok=True)
+        tmp_chk = checkpoint_file + ".tmp"
+        with open(tmp_chk, "w", encoding="utf-8") as f:
             json.dump(result_payload, f, ensure_ascii=False, indent=2)
-        os.replace(tmp_file, checkpoint_file)
+        os.replace(tmp_chk, checkpoint_file)
 
         return result_payload
 
     except Exception as exc:
-        elapsed = round(time.time() - start_ts, 2)
-        err_msg = f"{type(exc).__name__}: {exc}"
-        tb_str = traceback.format_exc()
-        fail_payload = {
-            "status": "failed",
+        err_payload: Dict[str, Any] = {
             "page_number": page_number,
-            "elapsed_sec": elapsed,
+            "status": "failed",
+            "error": str(exc),
+            "traceback": traceback.format_exc(),
             "mean_confidence": 0.0,
             "word_count": 0,
             "low_confidence_word_count": 0,
-            "page_direction": "N/A",
-            "column_count": 0,
-            "preview_image_path": "",
-            "extracted_text": "",
-            "layout": None,
-            "error": err_msg,
-            "traceback": tb_str,
+            "page_direction": "LTR",
+            "column_count": 1,
+            "duration_sec": round(time.time() - start_ts, 2),
+            "timestamp": time.time(),
         }
         try:
+            os.makedirs(config.checkpoint_dir, exist_ok=True)
             with open(checkpoint_file, "w", encoding="utf-8") as f:
-                json.dump(fail_payload, f, ensure_ascii=False, indent=2)
-        except OSError:
+                json.dump(err_payload, f, ensure_ascii=False, indent=2)
+        except Exception:
             pass
-        return fail_payload
+        return err_payload
 
 
 class BatchProcessor:
     """
-    Coordinates multiprocessing across PDF pages with pause/resume support,
-    abort/cancel termination, start/end page range filtering, live throughput & ETA metrics,
-    worker process recycling to prevent RAM bloat, instant per-page checkpointing,
-    and final book compilation.
+    Multiprocessing Batch Digitizer with atomic checkpoints, pause/resume,
+    live telemetry, and on-demand book re-assembly.
     """
 
     def __init__(
         self,
         config: AppConfig,
-        on_page_complete: Optional[Callable[..., None]] = None,
+        on_page_complete: Optional[Callable[[Dict[str, Any], int, int, Optional[Dict[str, Any]]], None]] = None,
         on_log: Optional[Callable[[str], None]] = None,
     ):
         self.config = config
         self.on_page_complete = on_page_complete
         self.on_log = on_log
+
         self._pause_requested = False
         self._stop_requested = False
+
+        self.start_time: float = 0.0
+        self.processed_count: int = 0
+        self.total_target_pages: int = 0
 
     def log(self, message: str) -> None:
         if self.on_log:
             self.on_log(message)
         else:
-            print(message)
+            print(f"[BatchProcessor] {message}")
 
     def request_pause(self) -> None:
         self._pause_requested = True
-        self.log("Pause requested. Waiting for active worker pages to finish...")
-
-    def request_resume(self) -> None:
-        self._pause_requested = False
+        self.log("Pause requested. Active worker processes will complete their current page.")
 
     def request_stop(self) -> None:
         self._stop_requested = True
-        self._pause_requested = True
-        self.log("Cancellation requested by user. Terminating active worker processes...")
-
-    def _load_existing_checkpoints(self, start_p: int, end_p: int) -> Dict[int, Dict[str, Any]]:
-        completed: Dict[int, Dict[str, Any]] = {}
-        if not self.config.resume_enabled or not os.path.isdir(self.config.checkpoint_dir):
-            return completed
-
-        for pnum in range(start_p, end_p + 1):
-            cfile = os.path.join(self.config.checkpoint_dir, f"page_{pnum:05d}.json")
-            if not os.path.exists(cfile):
-                continue
-            try:
-                with open(cfile, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if data.get("status") == "success" or (
-                    data.get("status") == "failed" and not self.config.retry_failed_on_resume
-                ):
-                    completed[pnum] = data
-            except Exception:
-                continue
-        return completed
+        self.log("Cancellation requested. Terminating background worker pool...")
 
     def preview_single_page(self, page_number: int) -> Dict[str, Any]:
+        """Runs the entire pipeline on a single page immediately."""
+        self.log(f"Running single-page inspection on Page #{page_number}...")
+        return process_single_page_worker((self.config.to_dict(), page_number))
+
+    def reassemble_books_from_checkpoints(self) -> Dict[str, Any]:
         """
-        Instant Single-Page Test/Preview mode: renders, preprocesses, OCRs,
-        and analyzes a single page in-process, returning original and processed
-        image paths alongside the extracted text and layout structure.
+        Assembles DOCX, PDF, EPUB, TXT, and HTML replicas directly from existing checkpoints
+        without re-running OCR. Incorporates any manual user text edits committed to checkpoints.
         """
-        self.config.ensure_directories()
-        if not os.path.exists(self.config.input_pdf_path):
-            raise FileNotFoundError(f"Input PDF not found: {self.config.input_pdf_path}")
+        chk_dir = self.config.checkpoint_dir
+        if not os.path.exists(chk_dir):
+            raise FileNotFoundError(f"Checkpoints directory not found at: {chk_dir}")
 
-        total_pages = get_pdf_page_count(
-            self.config.input_pdf_path, poppler_path=self.config.poppler_path
-        )
-        if page_number < 1 or page_number > total_pages:
-            raise ValueError(f"Page number {page_number} is out of bounds (1..{total_pages})")
+        cfiles = sorted([f for f in os.listdir(chk_dir) if f.startswith("page_") and f.endswith(".json")])
+        if not cfiles:
+            raise FileNotFoundError("No page checkpoint files found to assemble.")
 
-        start_ts = time.time()
-        self.log(f"Generating single-page preview for Page {page_number}...")
+        self.log(f"Loading {len(cfiles)} page checkpoint(s) for digital book re-assembly...")
+        all_results: Dict[int, Dict[str, Any]] = {}
+        successful_layouts: List[Dict[str, Any]] = []
 
-        # 1. Render raw PDF page
-        pil_img = render_single_pdf_page(
-            self.config.input_pdf_path,
-            page_number=page_number,
-            dpi=self.config.dpi,
-            poppler_path=self.config.poppler_path,
-        )
+        for f in cfiles:
+            p = os.path.join(chk_dir, f)
+            try:
+                with open(p, "r", encoding="utf-8") as fp:
+                    data = json.load(fp)
+                pnum = data.get("page_number")
+                if pnum:
+                    all_results[pnum] = data
+                    if data.get("status") == "success" and data.get("layout"):
+                        # If manually edited text exists, update layout paragraph text accordingly
+                        layout = data["layout"]
+                        if data.get("manually_edited") and data.get("extracted_text"):
+                            self._apply_manual_text_to_layout(layout, data["extracted_text"])
+                        successful_layouts.append(layout)
+            except Exception as exc:
+                self.log(f"Warning: could not read checkpoint {f}: {exc}")
 
-        orig_img_path = os.path.join(
-            self.config.extracted_images_dir, f"preview_p{page_number:05d}_orig.jpg"
-        )
-        if pil_img.mode not in ("RGB", "L"):
-            pil_img = pil_img.convert("RGB")
-        pil_img.save(orig_img_path, format="JPEG", quality=85, optimize=True)
+        self.log("Re-compiling DOCX, Searchable PDF, Reflow PDF, EPUB3, HTML5 & TXT...")
+        builder = BookBuilder(self.config)
+        generated_files = builder.build_all(successful_layouts)
 
-        # 2. Preprocess & dewarp
-        preprocessor = PagePreprocessor(self.config)
-        processed_pil, preproc_meta = preprocessor.process_page(pil_img, page_number)
+        report = self.generate_quality_report(all_results, len(all_results), generated_files)
+        self.log(f"Book re-assembly complete! Output saved to: {self.config.output_dir}")
+        return report
 
-        proc_img_path = os.path.join(
-            self.config.extracted_images_dir, f"preview_p{page_number:05d}_proc.jpg"
-        )
-        if processed_pil.mode not in ("RGB", "L"):
-            proc_save = processed_pil.convert("RGB")
-        else:
-            proc_save = processed_pil
-        proc_save.save(proc_img_path, format="JPEG", quality=85, optimize=True)
-
-        # 3. OCR Engine
-        ocr_engine = OCREngine(self.config)
-        ocr_raw = ocr_engine.run_ocr_on_page(
-            processed_pil,
-            page_number=page_number,
-            illustrations=preproc_meta.get("illustrations", []),
-        )
-
-        # 4. Linguistic correction & BiDi shaping
-        corrector = TextCorrector(self.config)
-        ocr_corrected = corrector.process_ocr_page(ocr_raw)
-
-        # 5. Layout, poetry & table analysis
-        analyzer = LayoutAnalyzer(self.config)
-        page_layout = analyzer.analyze_page(ocr_corrected, preproc_meta)
-
-        elapsed = round(time.time() - start_ts, 2)
-        extracted_text = extract_page_plain_text(page_layout)
-
-        preview_payload = {
-            "status": "success",
-            "page_number": page_number,
-            "elapsed_sec": elapsed,
-            "mean_confidence": page_layout["mean_confidence"],
-            "word_count": page_layout["word_count"],
-            "low_confidence_word_count": page_layout["low_confidence_word_count"],
-            "page_direction": page_layout["page_direction"],
-            "column_count": page_layout["column_count"],
-            "orig_image_path": orig_img_path,
-            "proc_image_path": proc_img_path,
-            "preview_image_path": proc_img_path,
-            "layout": page_layout,
-            "extracted_text": extracted_text,
-            "illustrations": preproc_meta.get("illustrations", []),
-            "error": None,
-        }
-
-        self.log(
-            f"Preview for Page {page_number} completed in {elapsed}s | "
-            f"Conf: {page_layout['mean_confidence']:.1f}% | "
-            f"Words: {page_layout['word_count']}"
-        )
-        return preview_payload
+    def _apply_manual_text_to_layout(self, layout: Dict[str, Any], manual_text: str) -> None:
+        """Helper to ensure manual text corrections feed into book builder layout elements."""
+        paragraphs = [p for p in manual_text.split("\n\n") if p.strip()]
+        if not paragraphs:
+            return
+        
+        # Replace or update primary layout elements with corrected paragraph text
+        elements = layout.get("elements", [])
+        if elements and len(elements) == len(paragraphs):
+            for i, p_str in enumerate(paragraphs):
+                elements[i]["logical_text"] = p_str
+        elif elements:
+            # Overwrite first element and append remaining
+            elements[0]["logical_text"] = "\n\n".join(paragraphs)
 
     def run(self) -> Dict[str, Any]:
-        self._pause_requested = False
-        self._stop_requested = False
-        self.config.ensure_directories()
-
+        """Main batch conversion execution loop."""
         if not os.path.exists(self.config.input_pdf_path):
             raise FileNotFoundError(f"Input PDF not found: {self.config.input_pdf_path}")
 
-        total_pages = get_pdf_page_count(
-            self.config.input_pdf_path, poppler_path=self.config.poppler_path
-        )
-        self.log(f"Detected {total_pages} total pages in '{os.path.basename(self.config.input_pdf_path)}'.")
-
-        # Determine target page range
-        start_p = max(1, self.config.start_page or 1)
-        end_p = total_pages
-        if self.config.end_page and self.config.end_page > 0:
-            end_p = min(total_pages, self.config.end_page)
-        if start_p > end_p:
-            start_p = 1
-            end_p = total_pages
-
+        total_pdf_pages = get_pdf_page_count(self.config.input_pdf_path)
+        start_p = self.config.start_page if self.config.start_page else 1
+        end_p = min(self.config.end_page if self.config.end_page else total_pdf_pages, total_pdf_pages)
         target_pages = list(range(start_p, end_p + 1))
         target_count = len(target_pages)
-        self.log(f"Targeting pages {start_p} to {end_p} ({target_count} pages).")
 
-        existing = self._load_existing_checkpoints(start_p, end_p)
-        if existing:
-            self.log(f"Resuming: found {len(existing)} already completed page checkpoints in range {start_p}-{end_p}.")
-            for pnum in sorted(existing.keys()):
-                if self.on_page_complete:
-                    try:
-                        self.on_page_complete(existing[pnum], len(existing), target_count, None)
-                    except TypeError:
-                        self.on_page_complete(existing[pnum], len(existing), target_count)
+        self.total_target_pages = target_count
+        self.start_time = time.time()
+        self.processed_count = 0
 
-        pending_pages = [p for p in target_pages if p not in existing]
-        all_results: Dict[int, Dict[str, Any]] = dict(existing)
+        self.log(
+            f"Starting digitization run for '{os.path.basename(self.config.input_pdf_path)}' "
+            f"({target_count} pages in scope: {start_p} to {end_p}) using {self.config.max_workers} worker processes..."
+        )
 
-        batch_start_ts = time.time()
-        initial_completed = len(existing)
+        os.makedirs(self.config.checkpoint_dir, exist_ok=True)
+        os.makedirs(self.config.extracted_images_dir, exist_ok=True)
+        os.makedirs(self.config.output_dir, exist_ok=True)
 
-        if pending_pages and not self._stop_requested:
-            workers = max(1, min(self.config.max_workers, len(pending_pages)))
-            self.log(f"Starting OCR multiprocessing pool with {workers} workers for {len(pending_pages)} pages...")
+        all_results: Dict[int, Dict[str, Any]] = {}
+        pending_pages: List[int] = []
+
+        # Check existing checkpoints to support seamless resume
+        for p in target_pages:
+            chk_file = os.path.join(self.config.checkpoint_dir, f"page_{p:05d}.json")
+            if os.path.exists(chk_file):
+                try:
+                    with open(chk_file, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    chk_pdf = data.get("input_pdf_path")
+                    curr_pdf = os.path.abspath(self.config.input_pdf_path)
+                    if data.get("status") == "success" and (not chk_pdf or chk_pdf == curr_pdf):
+                        all_results[p] = data
+                        self.processed_count += 1
+                        if self.on_page_complete:
+                            self.on_page_complete(data, self.processed_count, target_count, self._calc_stats())
+                    else:
+                        # Re-process previously failed or mismatched pages
+                        pending_pages.append(p)
+                except Exception:
+                    pending_pages.append(p)
+            else:
+                pending_pages.append(p)
+
+        if not pending_pages:
+            self.log(f"All {target_count} pages already completed in checkpoints. Proceeding directly to compilation...")
+        else:
+            self.log(f"{len(pending_pages)} pages remaining to be processed...")
 
             cfg_dict = self.config.to_dict()
-            page_iter = iter(pending_pages)
-            in_flight: Dict[concurrent.futures.Future, int] = {}
+            worker_tasks = [(cfg_dict, p) for p in pending_pages]
 
-            pool_kwargs: Dict[str, Any] = {"max_workers": workers}
-            if sys.version_info >= (3, 11):
-                pool_kwargs["max_tasks_per_child"] = 25
+            with concurrent.futures.ProcessPoolExecutor(max_workers=self.config.max_workers) as executor:
+                page_iter = iter(worker_tasks)
+                in_flight: Dict[concurrent.futures.Future, int] = {}
 
-            with concurrent.futures.ProcessPoolExecutor(**pool_kwargs) as executor:
-                # Prime the worker pool
-                while len(in_flight) < workers and not self._pause_requested and not self._stop_requested:
+                # Fill initial worker pool
+                for _ in range(min(self.config.max_workers * 2, len(worker_tasks))):
                     try:
-                        next_p = next(page_iter)
-                        fut = executor.submit(process_single_page_worker, (cfg_dict, next_p))
-                        in_flight[fut] = next_p
+                        task = next(page_iter)
+                        fut = executor.submit(process_single_page_worker, task)
+                        in_flight[fut] = task[1]
                     except StopIteration:
                         break
 
-                while in_flight and not self._stop_requested:
-                    done, _ = concurrent.futures.wait(
-                        in_flight.keys(),
-                        return_when=concurrent.futures.FIRST_COMPLETED,
+                while in_flight:
+                    if self._stop_requested:
+                        break
+
+                    done_futs, _ = concurrent.futures.wait(
+                        in_flight.keys(), return_when=concurrent.futures.FIRST_COMPLETED
                     )
-                    for fut in done:
+
+                    for fut in done_futs:
                         pnum = in_flight.pop(fut)
                         try:
                             res = fut.result()
                         except Exception as exc:
                             res = {
-                                "status": "failed",
                                 "page_number": pnum,
-                                "elapsed_sec": 0.0,
+                                "status": "failed",
+                                "error": str(exc),
                                 "mean_confidence": 0.0,
                                 "word_count": 0,
                                 "low_confidence_word_count": 0,
-                                "page_direction": "N/A",
-                                "column_count": 0,
-                                "preview_image_path": "",
-                                "extracted_text": "",
-                                "layout": None,
-                                "error": str(exc),
+                                "page_direction": "LTR",
+                                "column_count": 1,
                             }
+
                         all_results[pnum] = res
-
-                        # Compute real-time throughput & ETA
-                        done_count = len(all_results)
-                        run_done = done_count - initial_completed
-                        elapsed_sec = time.time() - batch_start_ts
-                        pages_per_min = (
-                            (run_done / elapsed_sec * 60.0)
-                            if elapsed_sec > 0.5 and run_done > 0
-                            else 0.0
-                        )
-                        remaining = max(0, target_count - done_count)
-                        eta_sec = (
-                            (remaining / (run_done / elapsed_sec))
-                            if run_done > 0 and elapsed_sec > 0
-                            else 0.0
-                        )
-
-                        elapsed_str = time.strftime("%H:%M:%S", time.gmtime(int(elapsed_sec)))
-                        eta_str = (
-                            time.strftime("%H:%M:%S", time.gmtime(int(eta_sec)))
-                            if eta_sec > 0
-                            else "--:--:--"
-                        )
-
-                        stats = {
-                            "elapsed_sec": round(elapsed_sec, 1),
-                            "elapsed_str": elapsed_str,
-                            "pages_per_min": round(pages_per_min, 1),
-                            "eta_sec": round(eta_sec, 1),
-                            "eta_str": eta_str,
-                            "done_count": done_count,
-                            "total_target": target_count,
-                            "remaining": remaining,
-                        }
+                        self.processed_count += 1
+                        stats = self._calc_stats()
 
                         if self.on_page_complete:
+                            self.on_page_complete(res, self.processed_count, target_count, stats)
+
+                        # Submit next pending job if not paused or stopped
+                        if not self._pause_requested and not self._stop_requested:
                             try:
-                                self.on_page_complete(res, done_count, target_count, stats)
-                            except TypeError:
-                                self.on_page_complete(res, done_count, target_count)
-
-                        if res["status"] == "success":
-                            self.log(
-                                f"Page {pnum}/{end_p} complete | "
-                                f"Conf: {res['mean_confidence']:.1f}% | "
-                                f"Speed: {pages_per_min:.1f} p/min | "
-                                f"ETA: {eta_str}"
-                            )
-                        else:
-                            self.log(f"Page {pnum}/{end_p} FAILED: {res.get('error')}")
-
-                        if self._stop_requested:
-                            break
-
-                        if not self._pause_requested:
-                            try:
-                                next_p = next(page_iter)
-                                new_fut = executor.submit(
-                                    process_single_page_worker, (cfg_dict, next_p)
-                                )
-                                in_flight[new_fut] = next_p
+                                next_task = next(page_iter)
+                                new_fut = executor.submit(process_single_page_worker, next_task)
+                                in_flight[new_fut] = next_task[1]
                             except StopIteration:
                                 pass
 
-                # If abort was requested, cancel remaining active futures
                 if self._stop_requested:
                     self.log("Batch stopped by user. Cancelling outstanding worker jobs...")
                     for fut in list(in_flight.keys()):
@@ -528,7 +433,7 @@ class BatchProcessor:
                 "total_pages": target_count,
             }
 
-        # Compile final outputs from all successful pages in range
+        # Compile final outputs
         successful_layouts = [
             r["layout"]
             for p in sorted(all_results.keys())
@@ -543,6 +448,22 @@ class BatchProcessor:
         report = self.generate_quality_report(all_results, target_count, generated_files)
         self.log(f"Conversion complete! Quality report saved to: {report['report_txt_path']}")
         return report
+
+    def _calc_stats(self) -> Dict[str, Any]:
+        elapsed = max(0.001, time.time() - self.start_time)
+        pages_per_sec = self.processed_count / elapsed
+        pages_per_min = pages_per_sec * 60.0
+
+        rem_pages = max(0, self.total_target_pages - self.processed_count)
+        eta_sec = (rem_pages / pages_per_sec) if pages_per_sec > 0 else 0
+
+        return {
+            "elapsed_sec": elapsed,
+            "elapsed_str": time.strftime("%H:%M:%S", time.gmtime(elapsed)),
+            "eta_sec": eta_sec,
+            "eta_str": time.strftime("%H:%M:%S", time.gmtime(eta_sec)) if eta_sec > 0 else "--:--:--",
+            "pages_per_min": round(pages_per_min, 1),
+        }
 
     def generate_quality_report(
         self,
